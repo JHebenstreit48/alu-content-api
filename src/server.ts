@@ -18,17 +18,25 @@ app.use(express.json());
 app.use(compression());
 
 // --- CORS ---
+// Accept localhost + 127.0.0.1 variants, and "no origin" (curl/tools) for dev.
+// Keep CLIENT_ORIGIN for prod (Netlify).
 const PROD_ORIGIN = (process.env.CLIENT_ORIGIN || "").replace(/\/+$/, "");
-const allowedOrigins = [
+const STATIC_ORIGINS = [
   "http://localhost:5173",
+  "http://127.0.0.1:5173",
   "http://localhost:3000",
-  ...(PROD_ORIGIN ? [PROD_ORIGIN] : []),
-];
+  "http://127.0.0.1:3000",
+  PROD_ORIGIN,
+].filter(Boolean);
 
 const corsOptions: CorsOptions = {
-  origin: allowedOrigins,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);                 // allow no-origin tools
+    if (STATIC_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
   allowedHeaders: ["Content-Type", "Authorization"],
   optionsSuccessStatus: 204,
 };
@@ -38,16 +46,22 @@ app.options("/api/*", cors(corsOptions));
 
 console.log(
   "🌐 (content) CORS allowed origins:",
-  allowedOrigins.length ? allowedOrigins.join(", ") : "(none)"
+  STATIC_ORIGINS.length ? STATIC_ORIGINS.join(", ") : "(none)"
 );
 
 // ============================
 //     Health/Debug Endpoints
 // ============================
+
+// Featherweight liveness for wake/ping (no DB work)
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ ok: true, service: "content" });
+});
+
 app.get("/api/health/cors", (req, res) => {
   const origin = req.headers.origin || "(none)";
   res.setHeader("X-Seen-Origin", String(origin));
-  res.json({ ok: true, allowedOrigins, seenOrigin: origin });
+  res.json({ ok: true, allowedOrigins: STATIC_ORIGINS, seenOrigin: origin });
 });
 
 app.get("/api/health/db", async (_req, res) => {
@@ -55,12 +69,10 @@ app.get("/api/health/db", async (_req, res) => {
     const state = mongoose.connection.readyState;
     const db: Db | undefined = (mongoose.connection as any).db;
 
-    // 👉 Update these names to match your actual collection names
     const collectionsToCount = [
       "manufacturers",
       "garagelevels",
       "legendstore",
-      // add others if you have them
     ];
 
     const counts: Record<string, number | null> = {};
@@ -70,7 +82,7 @@ app.get("/api/health/db", async (_req, res) => {
           try {
             counts[name] = await db.collection(name).estimatedDocumentCount();
           } catch {
-            counts[name] = null; // collection may not exist yet
+            counts[name] = null;
           }
         })
       );
@@ -80,9 +92,7 @@ app.get("/api/health/db", async (_req, res) => {
     if (db && typeof (db as any).stats === "function") {
       try {
         stats = await (db as any).stats();
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     }
 
     res.json({
@@ -110,12 +120,12 @@ app.get("/api/health/runtime", (_req, res) => {
   });
 });
 
-// ✅ Simple liveness
+// Legacy simple liveness
 app.get("/api/test", (_req, res) => {
   res.status(200).json({ status: "alive" });
 });
 
-// ✅ API routes (manufacturers, GL, legend store, etc.)
+// API routes (manufacturers, GL, legend store, etc.)
 app.use("/api", apiRoutes);
 
 // ============================
@@ -126,7 +136,7 @@ const main = async () => {
     await connectToDb();
     console.log("✅ (content) Database connected successfully.");
 
-    const PORT = process.env.PORT || 3002; // give it a distinct default from cars
+    const PORT = process.env.PORT || 3002; // distinct from cars
     console.log("🔍 Binding to port:", PORT);
     app.listen(PORT, () =>
       console.log(`🚀 Content API running on port ${PORT}`)
